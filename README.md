@@ -1,10 +1,10 @@
 # user-feedback-clustering
 
-> CLI tool that ingests CSV exports, clusters feedback semantically, and produces a labeled Markdown report — reducing PM synthesis from hours to minutes.
+> Ingests CSV exports, clusters feedback semantically, and produces a labeled Markdown report — reducing PM synthesis from hours to minutes. Available as a CLI and a Streamlit web UI.
 
 ## What it does
 
-Product teams accumulate feedback across CRM exports, Jira tickets, and support queues. Reading and grouping hundreds of items by hand is slow and inconsistent. This tool ingests one or more CSV files, computes semantic embeddings via OpenAI, groups items into themes with KMeans, and labels each theme using GPT-4o-mini — producing a structured Markdown report with descriptions and suggested actions.
+Product teams accumulate feedback across CRM exports, Jira tickets, and support queues. Reading and grouping hundreds of items by hand is slow and inconsistent. This tool ingests one or more CSV files, computes semantic embeddings via OpenAI, groups items into themes with KMeans, and labels each theme using GPT-4o-mini — producing a structured Markdown report with descriptions and suggested actions. You can drive the entire pipeline from the command line or through a browser-based UI.
 
 ## How it works
 
@@ -63,6 +63,25 @@ feedback-cluster run --config sources.yaml
 | `--clusters` | `-k` | `INT` | auto | Number of clusters. If omitted, k is chosen via the elbow method. |
 | `--output` | `-o` | `PATH` | stdout | Write report to a file instead of printing to stdout. |
 | `--yes` | `-y` | flag | `false` | Skip the cost confirmation prompt before calling the OpenAI API. |
+
+## Web UI
+
+```bash
+source .venv/bin/activate
+streamlit run app.py
+```
+
+Opens at `http://localhost:8501`. The API key can be set in the sidebar or loaded automatically from the `OPENAI_API_KEY` environment variable.
+
+**What you can do:**
+
+- Upload one or more CSV files and select text columns (plus an optional ID column) per file.
+- Set the cluster count to Auto-detect (elbow method) or choose a fixed value with a slider (2–15).
+- Toggle the embedding cache on or off.
+- Click **Run Pipeline** to execute — progress is shown stage by stage: Loading, Embedding, Clustering, Labeling.
+- Review the cost estimate and confirm before any OpenAI API call is made.
+- Explore results: metric cards (total items, cluster count, silhouette score), a 2D PCA scatter plot, and per-cluster expandable cards.
+- Download the full `report.md` directly from the UI.
 
 ## Config file format
 

@@ -1,0 +1,11 @@
+Issue key,Summary,Description
+JIRA-001,Slow page load performance,Homepage takes 8 seconds to load
+JIRA-002,Mobile responsive issues,Layout breaks on small screens
+JIRA-003,Authentication failures,Users getting logged out randomly
+JIRA-004,Export functionality broken,PDF export fails with timeout
+JIRA-005,Email notification spam,Users receiving duplicate notifications
+JIRA-006,Search not finding results,Full-text search returning empty
+JIRA-007,Crash on mobile app launch,Force close on Android devices
+JIRA-008,Incorrect billing calculation,Tax calculation is wrong
+JIRA-009,2FA setup broken,Cannot enroll new device
+JIRA-010,Settings not persisting,User preferences reset after session

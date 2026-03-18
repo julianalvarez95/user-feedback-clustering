@@ -1,0 +1,11 @@
+ticket_id,description,notes
+CRM-001,Login button not working on mobile,Customer reported on iOS 16
+CRM-002,Dashboard loads slowly,Takes 10+ seconds on first load
+CRM-003,Cannot export data to CSV,Export button gives 500 error
+CRM-004,Password reset email not arriving,Checked spam folder too
+CRM-005,Mobile app crashes on startup,Android 13 device
+CRM-006,Billing page shows wrong amount,Overcharged by $10
+CRM-007,Two-factor auth not working,SMS not received
+CRM-008,Search results are not relevant,Returns unrelated items
+CRM-009,Notification emails too frequent,Getting 20+ emails per day
+CRM-010,Dark mode not saving preference,Resets on every login

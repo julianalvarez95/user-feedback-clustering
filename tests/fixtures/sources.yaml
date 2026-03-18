@@ -1,0 +1,11 @@
+sources:
+  - name: crm
+    file: tests/fixtures/sample_crm.csv
+    text_columns: [description, notes]
+    id_column: ticket_id
+    encoding: utf-8
+  - name: jira
+    file: tests/fixtures/sample_jira.csv
+    text_columns: [Summary, Description]
+    id_column: Issue key
+    encoding: utf-8

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import io
 import os
 import tempfile
 from collections import defaultdict
@@ -15,8 +16,14 @@ from sklearn.decomposition import PCA
 
 from feedback_clustering.clustering.kmeans import cluster_items
 from feedback_clustering.config import SourceConfig
+from feedback_clustering.embeddings.cache import compute_hash, load_cache
 from feedback_clustering.embeddings.openai_embedder import embed_items, estimate_cost
-from feedback_clustering.exceptions import FeedbackClusteringError
+from feedback_clustering.exceptions import (
+    ConfigurationError,
+    EmbeddingError,
+    FeedbackClusteringError,
+    IngestionError,
+)
 from feedback_clustering.ingestion.csv_loader import load_multiple
 from feedback_clustering.labeling.openai_labeler import label_clusters
 from feedback_clustering.models import Cluster, FeedbackItem
@@ -28,6 +35,8 @@ st.set_page_config(
     layout="wide",
 )
 
+_SILHOUETTE_THRESHOLD = 0.35
+
 # ---------------------------------------------------------------------------
 # State machine
 # Stage values:
@@ -37,10 +46,43 @@ st.set_page_config(
 #   "done"         — results ready
 # ---------------------------------------------------------------------------
 
+
 def _reset_pipeline() -> None:
-    for key in ("stage", "items_loaded", "cost_info", "file_configs_state",
-                "items", "clusters", "silhouette", "report"):
+    for key in (
+        "stage",
+        "items_loaded",
+        "cost_info",
+        "file_configs_state",
+        "items",
+        "clusters",
+        "silhouette",
+        "report",
+    ):
         st.session_state.pop(key, None)
+
+
+def _show_error(exc: Exception) -> None:
+    """Show contextual error message based on exception type."""
+    if isinstance(exc, IngestionError):
+        st.error(
+            f"**Ingestion error:** {exc}\n\n"
+            "Tip: check that the selected text columns match the CSV headers, "
+            "or try switching to latin-1 encoding."
+        )
+    elif isinstance(exc, ConfigurationError):
+        st.error(
+            f"**Configuration error:** {exc}\n\n"
+            "Tip: verify that your OpenAI API Key is correct and active."
+        )
+    elif isinstance(exc, EmbeddingError):
+        st.error(
+            f"**Embedding error:** {exc}\n\n"
+            "Tip: check your OpenAI API quota, or wait a moment and retry."
+        )
+    elif isinstance(exc, FeedbackClusteringError):
+        st.error(f"**{type(exc).__name__}:** {exc}")
+    else:
+        st.error(f"**Unexpected error ({type(exc).__name__}):** {exc}")
 
 
 # ---------------------------------------------------------------------------
@@ -64,6 +106,67 @@ if cluster_mode == "Manual":
     manual_k = st.sidebar.slider("Clusters", min_value=2, max_value=15, value=5)
 
 use_cache: bool = st.sidebar.checkbox("Use embedding cache", value=True)
+
+if st.session_state.get("stage") is not None:
+    st.sidebar.divider()
+    if st.sidebar.button("Start Over", type="secondary"):
+        _reset_pipeline()
+        st.rerun()
+
+# ---------------------------------------------------------------------------
+# Step indicator stepper
+# ---------------------------------------------------------------------------
+_stage = st.session_state.get("stage")
+_step_map: dict[str | None, int] = {None: 0, "cost_preview": 1, "running": 2, "done": 3}
+_active = _step_map.get(_stage, 0)
+_steps = ["Upload & Configure", "Cost Estimate", "Running", "Results"]
+
+_step_parts: list[str] = []
+for _i, _label in enumerate(_steps):
+    if _i < _active:
+        _num_color = "#4F46E5"
+        _num_text = "#4F46E5"
+        _circle_bg = "#EEF2FF"
+        _circle_border = "2px solid #4F46E5"
+        _label_color = "#4F46E5"
+        _weight = "600"
+    elif _i == _active:
+        _num_color = "#4F46E5"
+        _num_text = "#FFFFFF"
+        _circle_bg = "#4F46E5"
+        _circle_border = "2px solid #4F46E5"
+        _label_color = "#4F46E5"
+        _weight = "700"
+    else:
+        _num_color = "#CBD5E1"
+        _num_text = "#94A3B8"
+        _circle_bg = "#F1F5F9"
+        _circle_border = "2px solid #CBD5E1"
+        _label_color = "#94A3B8"
+        _weight = "400"
+
+    _step_parts.append(
+        f'<div style="display:flex;flex-direction:column;align-items:center;gap:4px;min-width:120px;">'
+        f'<div style="width:32px;height:32px;border-radius:50%;border:{_circle_border};'
+        f'background:{_circle_bg};display:flex;align-items:center;justify-content:center;'
+        f'font-weight:700;color:{_num_text};font-size:14px;">{_i + 1}</div>'
+        f'<span style="font-size:12px;font-weight:{_weight};color:{_label_color};'
+        f'white-space:nowrap;">{_label}</span>'
+        f"</div>"
+    )
+    if _i < len(_steps) - 1:
+        _connector = "#4F46E5" if _i < _active else "#CBD5E1"
+        _step_parts.append(
+            f'<div style="flex:1;height:2px;background:{_connector};margin-top:-16px;"></div>'
+        )
+
+st.markdown(
+    '<div style="display:flex;align-items:flex-start;justify-content:center;'
+    'gap:0;padding:16px 0 24px 0;">'
+    + "".join(_step_parts)
+    + "</div>",
+    unsafe_allow_html=True,
+)
 
 # ---------------------------------------------------------------------------
 # Main area — Step 1: Upload
@@ -97,7 +200,7 @@ if uploaded_files:
 
         columns = sample_df.columns.str.strip().tolist()
 
-        col1, col2 = st.columns(2)
+        col1, col2, col3 = st.columns([3, 2, 1])
         with col1:
             text_cols = st.multiselect(
                 "Text columns (will be concatenated)",
@@ -112,16 +215,55 @@ if uploaded_files:
                 index=0,
                 key=f"id_{uf.name}",
             )
+        with col3:
+            encoding = st.selectbox(
+                "Encoding",
+                options=["utf-8", "latin-1"],
+                index=0,
+                key=f"enc_{uf.name}",
+            )
 
+        content = uf.read()
         file_configs.append(
             {
                 "name": uf.name,
-                "content": uf.read(),
+                "content": content,
                 "text_cols": text_cols,
                 "id_col": None if id_col == "(none)" else id_col,
+                "encoding": encoding,
             }
         )
         uf.seek(0)
+
+        if text_cols:
+            with st.expander("Preview first 5 rows →", expanded=False):
+                try:
+                    preview_df = pd.read_csv(
+                        io.BytesIO(content),
+                        nrows=5,
+                        dtype=str,
+                        encoding=encoding,
+                        on_bad_lines="skip",
+                    )
+                    preview_df.columns = preview_df.columns.str.strip()
+                    available_cols = [c for c in text_cols if c in preview_df.columns]
+                    if available_cols:
+                        preview_df["text_preview"] = (
+                            preview_df[available_cols].fillna("").agg(" ".join, axis=1)
+                        )
+                        id_display = (
+                            id_col
+                            if (id_col and id_col != "(none)" and id_col in preview_df.columns)
+                            else None
+                        )
+                        if id_display:
+                            preview_df = preview_df.rename(columns={id_display: "id"})
+                        cols_to_show = (["id"] if id_display else []) + ["text_preview"]
+                        st.dataframe(preview_df[cols_to_show], use_container_width=True)
+                    else:
+                        st.info("Selected text columns not found in preview.")
+                except Exception as exc:
+                    st.warning(f"Could not generate preview: {exc}")
 
 # ---------------------------------------------------------------------------
 # Run button — triggers Stage 1: load CSV + show cost preview
@@ -158,7 +300,7 @@ if st.button("Run Pipeline", disabled=not can_run, type="primary"):
                         file=tmp_path,
                         text_columns=cfg["text_cols"],
                         id_column=cfg["id_col"],
-                        encoding="utf-8",
+                        encoding=cfg["encoding"],
                     )
                 )
 
@@ -171,10 +313,29 @@ if st.button("Run Pipeline", disabled=not can_run, type="primary"):
         if not items_loaded:
             st.error("No items loaded — check that your text columns contain data.")
         else:
-            tokens, cost = estimate_cost([it.text for it in items_loaded])
+            # Count cached vs uncached to give accurate cost preview
+            existing_cache: dict[str, list[float]] = {}
+            if use_cache:
+                existing_cache = load_cache(Path(".embeddings_cache.json"))
+
+            all_texts = [it.text for it in items_loaded]
+            cached_count = sum(1 for t in all_texts if compute_hash(t) in existing_cache)
+            uncached_count = len(items_loaded) - cached_count
+            uncached_texts = [t for t in all_texts if compute_hash(t) not in existing_cache]
+
+            if uncached_texts:
+                tokens, cost = estimate_cost(uncached_texts)
+            else:
+                tokens, cost = 0, 0.0
+
             st.session_state["stage"] = "cost_preview"
             st.session_state["items_loaded"] = items_loaded
-            st.session_state["cost_info"] = (tokens, cost)
+            st.session_state["cost_info"] = {
+                "tokens": tokens,
+                "cost": cost,
+                "cached_count": cached_count,
+                "uncached_count": uncached_count,
+            }
             st.session_state["file_configs_state"] = {
                 "api_key": api_key,
                 "manual_k": manual_k,
@@ -184,20 +345,26 @@ if st.button("Run Pipeline", disabled=not can_run, type="primary"):
             st.rerun()
 
     except FeedbackClusteringError as exc:
-        st.error(str(exc))
+        _show_error(exc)
     except Exception as exc:
-        st.error(f"Unexpected error: {exc}")
+        _show_error(exc)
 
 # ---------------------------------------------------------------------------
 # Stage: cost_preview — show estimate and wait for confirmation
 # ---------------------------------------------------------------------------
 if st.session_state.get("stage") == "cost_preview":
-    tokens, cost = st.session_state["cost_info"]
+    cost_info = st.session_state["cost_info"]
     n_items = len(st.session_state["items_loaded"])
+    tokens = cost_info["tokens"]
+    cost = cost_info["cost"]
+    cached_count = cost_info["cached_count"]
+    uncached_count = cost_info["uncached_count"]
 
     st.info(
         f"**Embedding cost preview**\n\n"
         f"- Items to embed: **{n_items}**\n"
+        f"- Cached (free): **{cached_count}**\n"
+        f"- Uncached (will call API): **{uncached_count}**\n"
         f"- Estimated tokens: **{tokens:,}**\n"
         f"- Estimated cost: **${cost:.6f}**"
     )
@@ -235,9 +402,7 @@ if st.session_state.get("stage") == "running":
             )
 
         with st.status("Clustering…", expanded=True) as status:
-            items, silhouette = cluster_items(
-                items, n_clusters=cfg_state["manual_k"]
-            )
+            items, silhouette = cluster_items(items, n_clusters=cfg_state["manual_k"])
             n_clusters_found = len({it.cluster_id for it in items})
             status.update(
                 label=f"Clustered into {n_clusters_found} groups "
@@ -279,10 +444,10 @@ if st.session_state.get("stage") == "running":
         st.rerun()
 
     except FeedbackClusteringError as exc:
-        st.error(str(exc))
+        _show_error(exc)
         st.session_state["stage"] = None
     except Exception as exc:
-        st.error(f"Unexpected error: {exc}")
+        _show_error(exc)
         st.session_state["stage"] = None
 
 # ---------------------------------------------------------------------------
@@ -290,7 +455,7 @@ if st.session_state.get("stage") == "running":
 # ---------------------------------------------------------------------------
 if st.session_state.get("stage") == "done":
     items = st.session_state["items"]
-    clusters = st.session_state["clusters"]
+    clusters: list[Cluster] = st.session_state["clusters"]
     silhouette = st.session_state["silhouette"]
     report = st.session_state["report"]
 
@@ -302,42 +467,137 @@ if st.session_state.get("stage") == "done":
     col3.metric(
         "Silhouette score",
         f"{silhouette:.3f}",
-        delta="good" if silhouette >= 0.35 else "below threshold",
-        delta_color="normal" if silhouette >= 0.35 else "inverse",
+        delta="good" if silhouette >= _SILHOUETTE_THRESHOLD else "below threshold",
+        delta_color="normal" if silhouette >= _SILHOUETTE_THRESHOLD else "inverse",
     )
+
+    # Silhouette score guidance
+    if silhouette < 0.20:
+        st.error(
+            f"Cluster quality is poor (silhouette {silhouette:.3f} < 0.20). "
+            "Consider reviewing your column selection, filtering noise, or gathering more data."
+        )
+    elif silhouette < _SILHOUETTE_THRESHOLD:
+        st.warning(
+            f"Cluster quality is moderate (silhouette {silhouette:.3f}, target ≥ {_SILHOUETTE_THRESHOLD}). "
+            "Try adjusting the number of clusters or adding more text columns."
+        )
+    else:
+        st.success("Cluster quality is good.")
+
+    # Build cluster label lookup for scatter
+    cluster_id_to_label: dict[int, str] = {c.id: c.label for c in clusters}
+    multi_source = len({it.source for it in items}) > 1
 
     st.subheader("Cluster map")
     embeddings_matrix = np.array([it.embedding for it in items])
     coords = PCA(n_components=2).fit_transform(embeddings_matrix)
 
-    scatter_df = pd.DataFrame(
-        {
-            "x": coords[:, 0],
-            "y": coords[:, 1],
-            "cluster": [str(it.cluster_id) for it in items],
-            "text": [it.text[:120] for it in items],
-        }
-    )
-    fig = px.scatter(
-        scatter_df,
-        x="x",
-        y="y",
-        color="cluster",
-        hover_data={"text": True, "x": False, "y": False},
-        labels={"cluster": "Cluster"},
-        title="2D PCA projection of embeddings",
-    )
-    fig.update_traces(marker=dict(size=6, opacity=0.7))
-    st.plotly_chart(fig, use_container_width=True)
+    scatter_data: dict[str, list] = {
+        "x": coords[:, 0].tolist(),
+        "y": coords[:, 1].tolist(),
+        "cluster": [
+            cluster_id_to_label.get(it.cluster_id, str(it.cluster_id)) for it in items
+        ],
+        "text": [it.text[:120] for it in items],
+    }
+    if multi_source:
+        scatter_data["source"] = [it.source for it in items]
 
+    scatter_df = pd.DataFrame(scatter_data)
+    hover_cols: dict = {"text": True, "x": False, "y": False}
+    if multi_source:
+        hover_cols["source"] = True
+
+    bar_df = pd.DataFrame(
+        {"label": [c.label for c in clusters], "size": [c.size for c in clusters]}
+    ).sort_values("size", ascending=True)
+
+    chart_col, scatter_col = st.columns([1, 2])
+    with chart_col:
+        fig_bar = px.bar(
+            bar_df,
+            x="size",
+            y="label",
+            orientation="h",
+            color="size",
+            color_continuous_scale="Blues",
+            labels={"size": "Items", "label": "Cluster"},
+            title="Cluster sizes",
+        )
+        fig_bar.update_layout(coloraxis_showscale=False, margin=dict(l=0, r=0, t=40, b=0))
+        st.plotly_chart(fig_bar, use_container_width=True)
+
+    with scatter_col:
+        fig = px.scatter(
+            scatter_df,
+            x="x",
+            y="y",
+            color="cluster",
+            hover_data=hover_cols,
+            labels={"cluster": "Cluster"},
+            title="2D PCA projection of embeddings",
+        )
+        fig.update_traces(marker=dict(size=6, opacity=0.7))
+        st.plotly_chart(fig, use_container_width=True)
+
+    # Styled cluster cards
     st.subheader("Cluster details")
+    st.markdown(
+        """
+        <style>
+        .cluster-card {
+            border-left: 4px solid #4F46E5;
+            background: #F8F9FB;
+            border-radius: 4px;
+            padding: 16px 20px;
+            margin-bottom: 12px;
+        }
+        .cluster-card-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 10px;
+        }
+        .cluster-title {
+            font-size: 1.05em;
+            font-weight: 700;
+            color: #1A1A2E;
+        }
+        .cluster-badge {
+            background: #4F46E5;
+            color: white;
+            padding: 2px 12px;
+            border-radius: 12px;
+            font-size: 0.82em;
+            font-weight: 600;
+            white-space: nowrap;
+        }
+        .cluster-card p { margin: 4px 0 8px 0; color: #1A1A2E; }
+        .cluster-card ul { margin: 4px 0 0 0; padding-left: 18px; color: #374151; }
+        .cluster-card li { margin-bottom: 3px; font-size: 0.93em; }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
     for cluster in clusters:
-        with st.expander(f"**{cluster.label}** — {cluster.size} items"):
-            st.markdown(f"**Description:** {cluster.description}")
-            st.markdown(f"**Suggested action:** {cluster.suggested_action}")
-            st.markdown("**Representative examples:**")
-            for example in cluster.representative_examples:
-                st.markdown(f"- {example}")
+        examples_html = "".join(
+            f"<li>{ex[:200]}</li>" for ex in cluster.representative_examples
+        )
+        st.markdown(
+            f'<div class="cluster-card">'
+            f'<div class="cluster-card-header">'
+            f'<span class="cluster-title">{cluster.label}</span>'
+            f'<span class="cluster-badge">{cluster.size} items</span>'
+            f"</div>"
+            f"<p><strong>Description:</strong> {cluster.description}</p>"
+            f"<p><strong>Suggested action:</strong> {cluster.suggested_action}</p>"
+            f"<p><strong>Representative examples:</strong></p>"
+            f"<ul>{examples_html}</ul>"
+            f"</div>",
+            unsafe_allow_html=True,
+        )
 
     st.subheader("Download report")
     st.download_button(
@@ -346,7 +606,3 @@ if st.session_state.get("stage") == "done":
         file_name="report.md",
         mime="text/markdown",
     )
-
-    if st.button("Start over"):
-        _reset_pipeline()
-        st.rerun()

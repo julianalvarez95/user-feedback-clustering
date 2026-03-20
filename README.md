@@ -71,17 +71,23 @@ source .venv/bin/activate
 streamlit run app.py
 ```
 
-Opens at `http://localhost:8501`. The API key can be set in the sidebar or loaded automatically from the `OPENAI_API_KEY` environment variable.
+Opens at `http://localhost:8501` with a custom indigo theme. The API key can be set in the sidebar or loaded automatically from the `OPENAI_API_KEY` environment variable.
 
 **What you can do:**
 
-- Upload one or more CSV files and select text columns (plus an optional ID column) per file.
+- Upload one or more CSV files and configure **text columns**, **ID column**, and **encoding** (`utf-8` / `latin-1`) per file.
+- Preview the first 5 rows of each file before running.
 - Set the cluster count to Auto-detect (elbow method) or choose a fixed value with a slider (2–15).
 - Toggle the embedding cache on or off.
-- Click **Run Pipeline** to execute — progress is shown stage by stage: Loading, Embedding, Clustering, Labeling.
-- Review the cost estimate and confirm before any OpenAI API call is made.
-- Explore results: metric cards (total items, cluster count, silhouette score), a 2D PCA scatter plot, and per-cluster expandable cards.
+- Follow progress via a **step indicator** (Upload & Configure → Cost Estimate → Running → Results).
+- Review the **cost estimate** before any API call — cached items are shown separately so you see the real cost.
+- Click **Start Over** in the sidebar at any point to reset the pipeline.
+- Explore results:
+  - Metric cards (total items, cluster count, silhouette score) with **quality guidance** (poor / moderate / good).
+  - **Cluster size bar chart** alongside a 2D PCA scatter plot colored by cluster label.
+  - **Styled cluster cards** with descriptions, suggested actions, and representative examples.
 - Download the full `report.md` directly from the UI.
+- **Actionable error messages** — ingestion, API key, and quota errors show contextual hints instead of raw tracebacks.
 
 ## Config file format
 
